@@ -29,6 +29,7 @@ type ProxyHandler struct {
 	userStore     datastore.Datastore
 	taskStore     datastore.Datastore
 	modelStore    datastore.Datastore
+	httpClient    *http.Client // the http client
 	configStore   datastore.Datastore
 	functionStore datastore.Datastore
 }
@@ -39,6 +40,7 @@ func NewProxyHandler(taskStore datastore.Datastore,
 	return &ProxyHandler{
 		taskStore:     taskStore,
 		modelStore:    modelStore,
+		httpClient:    &http.Client{},
 		userStore:     userStore,
 		configStore:   configStore,
 		functionStore: functionStore,
@@ -496,7 +498,7 @@ func (p *ProxyHandler) ExtraImages(c *gin.Context) {
 // (POST /txt2img)
 func (p *ProxyHandler) Txt2Img(c *gin.Context) {
 	username := c.GetHeader(userKey)
-	invokeType := c.GetHeader(requestType)
+	//invokeType := c.GetHeader(requestType)
 	if username == "" {
 		if config.ConfigGlobal.EnableLogin() {
 			handleError(c, http.StatusBadRequest, config.BADREQUEST)
@@ -514,38 +516,15 @@ func (p *ProxyHandler) Txt2Img(c *gin.Context) {
 		handleError(c, http.StatusBadRequest, "stable_diffusion_model val not valid, please set valid val")
 		return
 	}
+
 	// taskId
-	taskId := c.GetHeader(taskKey)
+	taskId := request.ForceTaskId
 	if taskId == "" {
 		// init taskId
 		taskId = utils.RandStr(taskIdLength)
+		request.ForceTaskId = taskId
 	}
 	c.Writer.Header().Set("taskId", taskId)
-
-	endPoint := config.ConfigGlobal.Downstream
-	var err error
-	version := c.GetHeader(versionKey)
-	if config.ConfigGlobal.IsServerTypeMatch(config.CONTROL) {
-		// get endPoint
-		sdModel := request.StableDiffusionModel
-		c.Writer.Header().Set("model", sdModel)
-		// wait to valid
-		if concurrency.ConCurrencyGlobal.WaitToValid(sdModel) {
-			// cold start
-			logrus.WithFields(logrus.Fields{"taskId": taskId}).Infof("sd %s cold start ....", sdModel)
-			defer concurrency.ConCurrencyGlobal.DecColdNum(sdModel, taskId)
-		}
-		defer concurrency.ConCurrencyGlobal.DoneTask(sdModel, taskId)
-		endPoint, err = module.FuncManagerGlobal.GetEndpoint(sdModel)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, models.SubmitTaskResponse{
-				TaskId:  taskId,
-				Status:  config.TASK_FAILED,
-				Message: utils.String(err.Error()),
-			})
-			return
-		}
-	}
 	if config.ConfigGlobal.IsServerTypeMatch(config.PROXY) {
 		// check request valid: sdModel and sdVae exist
 		if existed := p.checkModelExist(request.StableDiffusionModel); !existed {
@@ -568,57 +547,239 @@ func (p *ProxyHandler) Txt2Img(c *gin.Context) {
 			})
 			return
 		}
-
-		// get user current config version
-		userItem, err := p.userStore.Get(username, []string{datastore.KUserConfigVer})
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, models.SubmitTaskResponse{
-				TaskId:  taskId,
-				Status:  config.TASK_FAILED,
-				Message: utils.String(config.OTSGETERROR),
-			})
-			logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorf("get config version err=%s", err.Error())
-			return
-		}
-		version = func() string {
-			if version, ok := userItem[datastore.KUserConfigVer]; !ok {
-				return "-1"
-			} else {
-				return version.(string)
-			}
-		}()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), config.HTTPTIMEOUT)
-	defer cancel()
-	// get client by endPoint
-	client := client.ManagerClientGlobal.GetClient(endPoint)
-	// async request
-	resp, err := client.Txt2Img(ctx, *request, func(ctx context.Context, req *http.Request) error {
-		req.Header.Add(userKey, username)
-		req.Header.Add(taskKey, taskId)
-		req.Header.Add(versionKey, version)
-		if isAsync(invokeType) {
-			req.Header.Add(FcAsyncKey, "Async")
-		}
-		return nil
-	})
-	if err != nil || (resp.StatusCode != syncSuccessCode && resp.StatusCode != asyncSuccessCode) {
-		handleRespError(c, err, resp, taskId)
+
+	// preprocess request ossPath image to base64
+	if err := preprocessRequest(request); err != nil {
+		// update task status
+		p.taskStore.Update(taskId, map[string]interface{}{
+			datastore.KTaskStatus:     config.TASK_FAILED,
+			datastore.KTaskCode:       int64(requestFail),
+			datastore.KTaskModifyTime: fmt.Sprintf("%d", utils.TimestampS()),
+		})
+		handleError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// update request OverrideSettings
+	if request.OverrideSettings == nil {
+		overrideSettings := make(map[string]interface{})
+		request.OverrideSettings = &overrideSettings
+	}
+	configVer := c.GetHeader(versionKey)
+	if err := p.updateOverrideSettingsRequest(request.OverrideSettings, username, configVer,
+		request.StableDiffusionModel, request.SdVae); err != nil {
+		logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorf("update OverrideSettings err=%s", err.Error())
+		handleError(c, http.StatusInternalServerError, "please check config")
+		return
+	}
+
+	// default OverrideSettingsRestoreAfterwards = true
+	request.OverrideSettingsRestoreAfterwards = utils.Bool(false)
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorln("request to json err=", err.Error())
+		handleError(c, http.StatusBadRequest, config.BADREQUEST)
+		return
+	}
+
+	// predict task
+	images, err := p.predictTask(username, taskId, config.TXT2IMG, body)
+	if err != nil {
+		//logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorln(err.Error())
+		c.JSON(http.StatusInternalServerError, models.SubmitTaskResponse{
+			TaskId:  taskId,
+			Status:  config.TASK_FAILED,
+			Message: utils.String(""),
+		})
+		return
+	}
+	if ossUrl, err := module.OssGlobal.GetUrl(images); err != nil {
+		logrus.Error("get oss url error")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "get oss url error",
+		})
 	} else {
 		c.JSON(http.StatusOK, models.SubmitTaskResponse{
 			TaskId: taskId,
-			Status: func() string {
-				if resp.StatusCode == syncSuccessCode {
-					return config.TASK_FINISH
-				}
-				if resp.StatusCode == asyncSuccessCode {
-					return config.TASK_QUEUE
-				}
-				return config.TASK_FAILED
-			}(),
-			OssUrl: extraOssUrl(resp),
+			Status: config.TASK_FINISH,
+			OssUrl: &ossUrl,
 		})
 	}
+}
+
+func (p *ProxyHandler) predictTask(user, taskId, path string, body []byte) ([]string, error) {
+	url := fmt.Sprintf("%s%s", config.ConfigGlobal.SdUrlPrefix, path)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err = io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	var result *models.Txt2ImgResult
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		//logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorln(err.Error())
+		return nil, err
+	}
+	if result == nil {
+		if err := p.taskStore.Update(taskId, map[string]interface{}{
+			datastore.KTaskCode:       int64(resp.StatusCode),
+			datastore.KTaskStatus:     config.TASK_FAILED,
+			datastore.KTaskInfo:       string(body),
+			datastore.KTaskModifyTime: fmt.Sprintf("%d", utils.TimestampS()),
+		}); err != nil {
+			logrus.WithFields(logrus.Fields{"taskId": taskId}).Println(err.Error())
+			return nil, err
+		}
+		return nil, errors.New("predict fail")
+	}
+	if result.Parameters != nil {
+		result.Parameters["alwayson_scripts"] = ""
+	}
+	params, err := json.Marshal(result.Parameters)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"taskId": taskId}).Println("json:", err.Error())
+	}
+	var images []string
+	var status string
+	var errMeg error
+	if resp.StatusCode == requestOk {
+		count := len(result.Images)
+		for i := 1; i <= count; i++ {
+			// upload image to oss
+			ossPath := fmt.Sprintf("images/%s/%s_%d.png", user, taskId, i)
+			if err := uploadImages(&ossPath, &result.Images[i-1]); err != nil {
+				return nil, fmt.Errorf("output image err=%s", err.Error())
+			}
+
+			images = append(images, ossPath)
+		}
+		status = config.TASK_FINISH
+	} else {
+		status = config.TASK_FAILED
+		errMeg = errors.New("predict error")
+	}
+	if err := p.taskStore.Update(taskId, map[string]interface{}{
+		datastore.KTaskCode:       int64(resp.StatusCode),
+		datastore.KTaskStatus:     status,
+		datastore.KTaskImage:      strings.Join(images, ","),
+		datastore.KTaskParams:     string(params),
+		datastore.KTaskInfo:       result.Info,
+		datastore.KTaskModifyTime: fmt.Sprintf("%d", utils.TimestampS()),
+	}); err != nil {
+		logrus.WithFields(logrus.Fields{"taskId": taskId}).Errorln(err.Error())
+		return nil, err
+	}
+	return images, errMeg
+}
+
+// deal ossImg to base64
+func preprocessRequest(req any) error {
+	switch req.(type) {
+	case *models.ExtraImagesJSONRequestBody:
+		request := req.(*models.ExtraImagesJSONRequestBody)
+		if request.Image != "" {
+			if isImgPath(request.Image) {
+
+				base64, err := module.OssGlobal.DownloadFileToBase64(request.Image)
+				if err != nil {
+					return err
+				}
+				request.Image = *base64
+			}
+		}
+	case *models.Txt2ImgJSONRequestBody:
+		request := req.(*models.Txt2ImgJSONRequestBody)
+		if request.AlwaysonScripts != nil {
+			return updateControlNet(request.AlwaysonScripts)
+		}
+	case *models.Img2ImgJSONRequestBody:
+		request := req.(*models.Img2ImgJSONRequestBody)
+		// init images: ossPath to base64Str
+		for i, str := range *request.InitImages {
+			if !isImgPath(str) {
+				continue
+			}
+			base64, err := module.OssGlobal.DownloadFileToBase64(str)
+			if err != nil {
+				return err
+			}
+			(*request.InitImages)[i] = *base64
+		}
+
+		// mask images: ossPath to base64St
+		if request.Mask != nil && isImgPath(*request.Mask) {
+			base64, err := module.OssGlobal.DownloadFileToBase64(*request.Mask)
+			if err != nil {
+				return err
+			}
+			*request.Mask = *base64
+		}
+
+		// controlNet images: ossPath to base64Str
+		if request.AlwaysonScripts != nil {
+			return updateControlNet(request.AlwaysonScripts)
+		}
+	}
+	return nil
+}
+
+func updateControlNet(alwaysonScripts *map[string]interface{}) error {
+	*alwaysonScripts = parseMap(*alwaysonScripts, "", "", nil)
+	return nil
+}
+
+func (p *ProxyHandler) updateOverrideSettingsRequest(overrideSettings *map[string]interface{},
+	username, configVersion, sdModel string, sdVae *string) error {
+	//if config.ConfigGlobal.GetFlexMode() == config.MultiFunc {
+	//	// remove sd_model_checkpoint and sd_vae
+	//	delete(*overrideSettings, "sd_model_checkpoint")
+	//	(*overrideSettings)["sd_vae"] = sdVae
+	//} else {
+	(*overrideSettings)["sd_model_checkpoint"] = sdModel
+	if sdVae != nil {
+		(*overrideSettings)["sd_vae"] = sdVae
+	} else {
+		(*overrideSettings)["sd_vae"] = "None"
+	}
+	//}
+	// version == -1 use default
+	if configVersion == "-1" {
+		return nil
+	}
+	// read config from db
+	key := fmt.Sprintf("%s_%s", username, configVersion)
+	data, err := p.configStore.Get(key, []string{datastore.KConfigVal})
+	if err != nil {
+		return err
+	}
+	// no user config, user default
+	if data == nil || len(data) == 0 {
+		return nil
+	}
+	val := data[datastore.KConfigVal].(string)
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(val), &m); err != nil {
+		return nil
+	}
+	// priority request > db
+	for k, v := range m {
+		if _, ok := (*overrideSettings)[k]; !ok {
+			(*overrideSettings)[k] = v
+		}
+	}
+	return nil
 }
 
 // Img2Img img to img predict

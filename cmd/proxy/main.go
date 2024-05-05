@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	defaultPort       = "7860"
-	defaultDBType     = datastore.TableStore
-	shutdownTimeout   = 5 * time.Second // 5s
-	defaultConfigPath = "config.json"
+	defaultPort     = "7862"
+	defaultDBType   = datastore.TableStore
+	shutdownTimeout = 5 * time.Second // 5s
+	//defaultConfigPath = "config.json"
+	defaultConfigPath = "proxy.yaml"
+	//defaultConfigPath = "control.yaml"
 )
 
 func handleSignal() {

@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -92,6 +91,7 @@ func (s *SDManager) init() error {
 			fmt.Sprintf("sd start cost=%d", sdEndTs-sdStartTs)}
 	}()
 	// start sd
+	// todo: 修改成windows启动方式
 	execItem, err := utils.DoExecAsync(config.ConfigGlobal.SdShell, config.ConfigGlobal.SdPath, s.getEnv())
 	if err != nil {
 		return err
@@ -172,7 +172,7 @@ func (s *SDManager) detectSdAlive() {
 
 func (s *SDManager) KillAgentWithoutSd() {
 	if !checkSdExist(strconv.Itoa(s.pid)) && !utils.PortCheck(s.port, SD_DETECT_TIMEOUT) {
-		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		//syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	}
 }
 
@@ -198,7 +198,7 @@ func (s *SDManager) WaitSDRestartFinish() {
 }
 
 func (s *SDManager) Close() {
-	syscall.Kill(-s.pid, syscall.SIGKILL)
+	//syscall.Kill(-s.pid, syscall.SIGKILL)
 	s.endChan <- struct{}{}
 }
 

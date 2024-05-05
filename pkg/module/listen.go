@@ -64,7 +64,7 @@ func NewListenDbTask(intervalSecond int32, taskStore datastore.Datastore,
 		tasks:          new(sync.Map),
 		stop:           make(chan struct{}),
 	}
-	go listenTask.init()
+	//go listenTask.init()
 	return listenTask
 }
 

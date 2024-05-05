@@ -52,7 +52,7 @@ func DoExecAsync(shell, dir string, env []string) (*ExecItem, error) {
 		Status: 0,
 	}
 	cmd := exec.Command("/bin/bash", "-c", shell)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	//cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, _ := cmd.StdoutPipe()
 	cmd.Stderr = cmd.Stdout
 	if env != nil {

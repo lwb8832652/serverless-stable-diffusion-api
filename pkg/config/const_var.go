@@ -100,7 +100,7 @@ const (
 
 // default value
 const (
-	DefaultSdPort              = "7861"
+	DefaultSdPort              = "7860"
 	DefaultSdPath              = "/stable-diffusion-webui"
 	DefaultSdPathProxy         = "/mnt/auto/sd"
 	DefaultExtraArgs           = "--api"
@@ -110,7 +110,7 @@ const (
 	DefaultFlexMode            = "multiFunc" // value: singleFunc|multiFunc
 	DefaultOssPath             = "/mnt/oss"
 	DefaultLogService          = "http://server-ai-backend-agwwspzdwb.cn-hangzhou.devsapp.net"
-	DefaultCaPort              = 7860
+	DefaultCaPort              = 7861
 	DefaultCpu                 = 8
 	DefaultDisk                = 512
 	DefaultInstanceConcurrency = 1
