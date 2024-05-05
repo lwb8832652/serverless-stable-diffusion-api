@@ -80,7 +80,7 @@ type Error struct {
 
 // ExtraImagesRequest defines model for ExtraImagesRequest.
 type ExtraImagesRequest struct {
-	ForceTaskId       		  *string  `json:"force_task_id,omitempty"`
+	ForceTaskId               *string  `json:"force_task_id,omitempty"`
 	CodeformerVisibility      *float32 `json:"codeformer_visibility,omitempty"`
 	CodeformerWeight          *float32 `json:"codeformer_weight,omitempty"`
 	ExtrasUpscaler2Visibility *float32 `json:"extras_upscaler_2_visibility,omitempty"`
@@ -100,7 +100,7 @@ type ExtraImagesRequest struct {
 
 // Img2ImgRequest defines model for Img2ImgRequest.
 type Img2ImgRequest struct {
-	ForceTaskId       				  *string  				  `json:"force_task_id,omitempty"`
+	ForceTaskId                       *string                 `json:"force_task_id,omitempty"`
 	AlwaysonScripts                   *map[string]interface{} `json:"alwayson_scripts,omitempty"`
 	BatchSize                         *int64                  `json:"batch_size,omitempty"`
 	CfgScale                          *float32                `json:"cfg_scale,omitempty"`
@@ -251,7 +251,7 @@ type TaskResultResponse struct {
 
 // Txt2ImgRequest defines model for Txt2ImgRequest.
 type Txt2ImgRequest struct {
-	ForceTaskId       				  string  				  `json:"force_task_id,omitempty"`
+	ForceTaskId                       string                  `json:"force_task_id,omitempty"`
 	AlwaysonScripts                   *map[string]interface{} `json:"alwayson_scripts,omitempty"`
 	BatchSize                         *int64                  `json:"batch_size,omitempty"`
 	CfgScale                          *float32                `json:"cfg_scale,omitempty"`
